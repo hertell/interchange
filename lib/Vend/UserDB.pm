@@ -128,7 +128,7 @@ sub enc_bcrypt {
 
     my $bcrypt = Digest::Bcrypt->new;
 
-    my $salt =
+    $salt =
         $store->{salt}
         ||
         Crypt::Random::makerandom_octet(
@@ -986,7 +986,7 @@ sub get_values {
 	my($self, $valref, $scratchref) = @_;
 
 	my $same;
-	if($valref eq $scratchref) {
+	if($valref and $valref eq $scratchref) {
 		$same = 1;
 	}
 
@@ -1090,6 +1090,25 @@ sub get_values {
 			my ($k, $v) = split /=/, $_;
 			$v ||= $k;
 			$scratch{$k} = $v;
+		}
+		#
+		## $self->{ADMIN} comes when promote_admin option is set to a field,
+		## and that field is set in both scratch and the database.
+		## For instance:
+		#   
+		#   UserDb  default  scratch        "dealer promote_admin"
+		#   UserDb  default  promote_admin  promote_admin
+		#
+		#  If the "promote_admin" field is present in the database and
+		#  set to a true value, user will be made $Vend::admin. Cannot be
+		#  superuser.
+		#
+		#  This allows use of potential AllowGlobalAdmin and NoStrictAdmin
+		#  features.
+		#
+		my $pafield;
+		if($pafield = $self->{OPTIONS}{promote_admin} and $scratch{$pafield}) {
+			$self->{ADMIN} = 1;
 		}
 #::logDebug("scratch ones: " . join " ", @s);
 	}
@@ -1742,8 +1761,8 @@ sub login {
 		if($foreign) {
 			my $uname = ($self->{PASSED_USERNAME} ||= $self->{USERNAME});
 			my $ufield = $self->{LOCATION}{USERNAME};
-			$uname = $udb->quote($uname);
-			my $q = "select $ufield from $self->{DB_ID} where $foreign = $uname";
+			my $quname = $udb->quote($uname);
+			my $q = "select $ufield from $self->{DB_ID} where $foreign = $quname";
 #::logDebug("indirect login query: $q");
 			my $ary = $udb->query($q)
 				or do {
@@ -1755,10 +1774,15 @@ sub login {
 					$self->log_either(errmsg(
 						@$ary ? "Denied attempted login with ambiguous (indirect from %s) user name %s" : "Denied attempted login with nonexistent (indirect from %s) user name %s",
 						$foreign,
-						$uname,
+						$quname,
 						$self->{USERNAME},
 					));
-					die $stock_error, "\n";
+					if ($self->{OPTIONS}{fallback_login}) {
+						$ary->[0][0] = $uname;
+					}
+					else {
+						die $stock_error, "\n";
+					}
 				};
 			$self->{USERNAME} = $ary->[0][0];
 		}
@@ -1942,6 +1966,12 @@ sub login {
 	$Vend::username = $Vend::Session->{username} = $self->{USERNAME};
 	$Vend::Session->{logged_in} = 1;
 
+	## $self->{ADMIN} comes when promote_admin option is set to a field,
+	## and that field is set in both scratch and the database.
+	if ( $self->{ADMIN} or $Vend::ReadOnlyCfg->{AdminUserDB}{$self->{PROFILE}} ) {
+		$Vend::admin = 1;
+	}
+
 	if (my $macros = $self->{OPTIONS}{postlogin_action}) {
 		eval {
 			Vend::Dispatch::run_macro $macros;
@@ -1966,6 +1996,15 @@ sub logout {
 	scrub();
 
 	my $opt = $self->{OPTIONS};
+
+	if (my $macros = $opt->{prelogout_action}) {
+		eval {
+			Vend::Dispatch::run_macro $macros;
+		};
+		if ($@) {
+			logError("UserDB prelogout_action execution error: %s\n", $@);
+		}
+	}
 
 	if( is_yes($opt->{clear}) ) {
 		$self->clear_values();
@@ -2940,9 +2979,6 @@ sub userdb {
 			return undef;
 		}
 		if ($status = $user->login(%options) ) {
-			if( $Vend::ReadOnlyCfg->{AdminUserDB}{$user->{PROFILE}} ) {
-				$Vend::admin = 1;
-			}
 			::update_user();
 		}
 	}

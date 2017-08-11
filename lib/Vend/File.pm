@@ -54,7 +54,6 @@ my $PERLQQ = 0x0100; # from Encode(3perl)
 unless( $ENV{MINIVEND_DISABLE_UTF8} ) {
 	require Encode;
 	import Encode qw( is_utf8 );
-	$PERLQQ = Encode::PERLQQ();
 }
 
 use Vend::Util;
@@ -708,10 +707,13 @@ sub allowed_file {
 	my $fn = shift;
 	my $write = shift;
 	my $status = 1;
+	my $pat;
 	$Vend::File::errstr = '';
 	if(	$Global::NoAbsolute
 			and
-		$fn !~ $Global::AllowedFileRegex->{$Vend::Cat}
+		$pat = $Global::AllowedFileRegex->{$Vend::Cat || ''}
+			and
+		$fn !~ $pat
 			and
 		absolute_or_relative($fn)
 		)

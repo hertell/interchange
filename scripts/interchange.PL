@@ -152,6 +152,7 @@ BEGIN {
 
 use vars qw($VERSION);
 require Exporter;
+no warnings qw/once/;
 
 BEGIN {
 	$VERSION = '5.10.0';
@@ -584,7 +585,7 @@ sub catch_warnings {
 		return @_ unless $_[0] =~ /^Use of uninitialized /;
 		my $warn = $_[0];
 		my $configline;
-		if($warn =~ /CONFIG>\s+chunk\s+(\d+)/) {
+		if(($configline) = ($warn =~ /CONFIG>\s+chunk\s+(\d+)/)) {
 			return <<EOF;
 There is a possible problem in this catalog at line $configline
 of the catalog.cfg file. Please check it out.

@@ -157,7 +157,7 @@ BEGIN {
 }
 
 use vars @Share_vars, @Share_routines,
-		 qw/$ready_safe $safe_safe/;
+		 qw/$ready_safe $safe_safe $always_global $loop_calc/;
 use vars qw/%Filter %Ship_handler $Safe_data/;
 
 $ready_safe = new Vend::Safe;
@@ -191,6 +191,8 @@ sub reset_calc {
 		$Tag        = new Vend::Tags;
 		$Sub        = new Vend::Subs;
 	}
+	$always_global = $Global::PerlAlwaysGlobal->{$Vend::Cat};
+	$loop_calc = $always_global ? sub { tag_perl('', {}, @_) }: \&tag_calc;
 	$Tmp        = {};
 	undef $s;
 	undef $q;
@@ -1612,6 +1614,16 @@ sub tag_perl {
 		}
 	}
 
+	my $not_global = 1;
+	if (
+		( $opt->{global} or (! defined $opt->{global} and $always_global ) )
+			and
+		$Global::AllowGlobal->{$Vend::Cat}
+		)
+	{
+		$not_global = 0;
+	}
+
 	if($tables) {
 		my (@tab) = grep /\S/, split /\s+/, $tables;
 		foreach my $tab (@tab) {
@@ -1628,7 +1640,7 @@ sub tag_perl {
 				$dbh = $db->dbh();
 			}
 
-			if($hole) {
+			if($not_global and $hole) {
 				if ($dbh) {
 					$Sql{$tab} = $hole->wrap($dbh);
 				}
@@ -1645,7 +1657,14 @@ sub tag_perl {
 		}
 	}
 
-	$Tag = $hole->wrap($Tag) if $hole and ! $Vend::TagWrapped++;
+	if($not_global) {
+		$Vend::TagWrapped ||= $Tag = $hole->wrap($Tag);
+		$MVSAFE::Safe = 1;
+	}
+	else {
+		$Tag = new Vend::Tags;
+		$MVSAFE::Safe = 0;
+	}
 
 	init_calc() if ! $Vend::Calc_initialized;
 	$ready_safe->share(@share) if @share;
@@ -1666,18 +1685,18 @@ sub tag_perl {
 
 	# Skip costly eval of code entirely if perl tag was called with no code,
 	# likely used only for the side-effect of opening database handles
-	return if $body !~ /\S/;
+	
+	if($body !~ /\S/) {
+		undef $MVSAFE::Safe;
+		return;
+	}
 
 	$body =~ tr/\r//d if $Global::Windows;
 
-	$MVSAFE::Safe = 1;
-	if (
-		( $opt->{global} or (! defined $opt->{global} and $Global::PerlAlwaysGlobal->{$Vend::Cat} ) )
-			and
-		$Global::AllowGlobal->{$Vend::Cat}
-		)
-	{
-		$MVSAFE::Safe = 0 unless $MVSAFE::Unsafe;
+	### Make calc/perl namespaces match
+	if($always_global) {
+		my $safepackage = $ready_safe->root();
+		$body = "package $safepackage;\n$body";
 	}
 
 	if(! $MVSAFE::Safe) {
@@ -1693,6 +1712,8 @@ sub tag_perl {
 		$result = $ready_safe->reval($body);
 	}
 
+	## Package might have changed with PerlAlwaysGlobal
+	package Vend::Interpolate;
 	undef $MVSAFE::Safe;
 
 	if ($@) {
@@ -2225,7 +2246,8 @@ sub tag_counter {
 		return undef;
 	}
 	
-    $file = $Vend::Cfg->{VendRoot} . "/$file"
+	my $basedir = $Vend::Cfg->{CounterDir} || $Vend::Cfg->{VendRoot};
+    $file = "$basedir/$file"
         unless Vend::Util::file_name_is_absolute($file);
 
 	for(qw/inc_routine dec_routine/) {
@@ -2522,7 +2544,6 @@ sub tag_mail {
     }
 
     if (!$ok) {
-		close MAIL;
 		$body = substr($body, 0, 2000) if length($body) > 2000;
         return error_opt(
 					"Unable to send mail using %s\n%s",
@@ -2742,7 +2763,7 @@ sub tag_area {
 
 	$urlroutine = $opt->{secure} ? \&secure_vendUrl : \&vendUrl;
 
-	return $urlroutine->($page, $arg, undef, $opt);
+	return $urlroutine->($page, $arg, $r, $opt);
 }
 
 }
@@ -4279,7 +4300,7 @@ my $once = 0;
 				$Row = {};
 				@{$Row}{@$fa} = @$row;
 			}
-			tag_calc($1)
+			$loop_calc->($1)
 			#ige;
 		$run =~ s#$B$QR{_exec}$E$QR{'/_exec'}#
 					init_calc() if ! $Vend::Calc_initialized;
@@ -4497,7 +4518,7 @@ sub iterate_hash_list {
 		$run =~ s#$B$QR{_tag}($Some$E[-_]tag[-_]\1\])#
 						tag_dispatch($1,$count, $item, $hash, $2)#ige;
 		$Row = $item;
-		$run =~ s#$B$QR{_calc}$E$QR{'/_calc'}#tag_calc($1)#ige;
+		$run =~ s#$B$QR{_calc}$E$QR{'/_calc'}#$loop_calc->($1)#ige;
 		$run =~ s#$B$QR{_exec}$E$QR{'/_exec'}#
 					init_calc() if ! $Vend::Calc_initialized;
 					(

@@ -925,8 +925,7 @@ sub display {
 									log => 'none',
 									enable => $opt->{restrict_allow},
 									disable => $opt->{restrict_deny},
-									body => $record->{$_},
-								});
+								}, $record->{$_});
 			}
 			else {
 				$record->{$_} = expand_values($record->{$_});
@@ -1065,7 +1064,7 @@ EOF
 	}
 	else {
 		# Strip the {TAG} {/TAG} pairs if nothing there
-		$template =~ s#{([A-Z_]+)}(.*?){/\1}#$sub{$1} ? $2: '' #ges;
+		$template =~ s#\{([A-Z_]+)\}(.*?)\{/\1\}#$sub{$1} ? $2: '' #ges;
 		# Insert the TAG
               $sub{HELP_URL} ||= 'javascript:void(0)';
 		$template =~ s/\$([A-Z_]+)\$/$sub{$1}/g;

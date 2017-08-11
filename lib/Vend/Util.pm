@@ -1,6 +1,6 @@
 # Vend::Util - Interchange utility functions
 #
-# Copyright (C) 2002-2016 Interchange Development Group
+# Copyright (C) 2002-2017 Interchange Development Group
 # Copyright (C) 1996-2002 Red Hat, Inc.
 #
 # This program was originally based on Vend 0.2 and 0.3
@@ -93,6 +93,7 @@ else {
 
 use strict;
 no warnings qw(uninitialized numeric);
+no if $^V ge v5.22.0, warnings => qw(redundant);
 use Config;
 use Fcntl;
 use Errno;
@@ -102,7 +103,7 @@ use Vend::Safe;
 use Vend::File;
 use subs qw(logError logGlobal);
 use vars qw($VERSION @EXPORT @EXPORT_OK);
-$VERSION = '2.128';
+$VERSION = '2.129';
 
 my $Eval_routine;
 my $Eval_routine_file;
@@ -890,7 +891,7 @@ sub is_hash {
 # Verify that passed string is a valid IPv4 address.
 sub is_ipv4 {
     my $addr = shift or return;
-    my @segs = split /\./, $addr;
+    my @segs = split /\./, $addr, -1;
     return unless @segs == 4;
     foreach (@segs) {
 		return unless /^\d{1,3}$/ && !/^0\d/;
@@ -901,12 +902,14 @@ sub is_ipv4 {
 
 # Verify that passed string is a valid IPv6 address.
 sub is_ipv6 {
-    my $addr = shift or return;
-    my @segs = split ':', $addr;
+    my $tosplit = my $addr = shift or return;
+    $tosplit =~ s/^:://;
+    $tosplit =~ s/::$//;
+    my @segs = split /:+/, $tosplit, -1;
 
     my $quads = 8;
     # Check for IPv4 style ending
-    if ($segs[-1] =~ /\./) {
+    if (@segs && $segs[-1] =~ /\./) {
 	return unless is_ipv4(pop @segs);
 	$quads = 6;
     }
@@ -1382,7 +1385,11 @@ sub vendUrl {
 		$opt->{secure} = $CGI::secure;
 	}
 
-	if($opt->{secure} or exists $Vend::Cfg->{AlwaysSecure}{$path}) {
+	my $asg = $Vend::Cfg->{AlwaysSecureGlob};
+	if ($opt->{secure}
+		or exists $Vend::Cfg->{AlwaysSecure}{$path}
+		or ($asg and $path =~ $asg)
+	) {
 		$r = $Vend::Cfg->{SecureURL};
 	}
 
@@ -2486,6 +2493,27 @@ sub timecard_read {
 # optional.
 #
 sub adjust_time {
+    # We need special adjustments to take into account end of month or leap year
+    # issues in adjusting the month or year.  This sub will adjust the time
+    # passed in $time as well as kick back a unixtime of the adjusted time.
+    my $perform_adjust = sub {
+	my ($time, $adjust) = @_;
+	# Do an adjustment based on year and month first to check for issues
+	# with leap year and end of month variances.  We set isdst to -1 to
+	# avoid variances due to DST time change.
+	my @timecheck = @$time;
+	$timecheck[5] += $adjust->[5];
+	$timecheck[4] += $adjust->[4];
+	$timecheck[8] = -1;
+	my @adjusted = localtime(POSIX::mktime(@timecheck));
+	# If the day is off we need to add an additional adjustment for it.
+	$adjust->[3] -= $adjusted[3] if $adjusted[3] < $timecheck[3];
+	$time->[$_] += $adjust->[$_] for (0..5);
+	my $unixtime = POSIX::mktime(@$time);
+	@$time = localtime($unixtime);
+	return $unixtime;
+    };
+
     my ($adjust, $time, $compensate_dst) = @_;
     $time ||= time;
 
@@ -2507,6 +2535,7 @@ sub adjust_time {
     # or leave the time the same).
 
     my @times = localtime($time);
+    my @adjust = (0)x6;
     my $sign = 1;
 
     foreach my $amount ($adjust =~ /([+-]?\s*[\d\.]+\s*[a-z]*)/ig) {
@@ -2523,12 +2552,12 @@ sub adjust_time {
 	    $amount *= 7;
 	}
 
-	if ($unit =~ /^s/) { $times[0] += $amount }
-	elsif ($unit =~ /^mo/) { $times[4] += $amount } # has to come before min
-	elsif ($unit =~ /^m/) { $times[1] += $amount }
-	elsif ($unit =~ /^h/) { $times[2] += $amount }
-	elsif ($unit =~ /^d/) { $times[3] += $amount }
-	elsif ($unit =~ /^y/) { $times[5] += $amount }
+	if ($unit =~ /^s/) { $adjust[0] += $amount }
+	elsif ($unit =~ /^mo/) { $adjust[4] += $amount } # has to come before min
+	elsif ($unit =~ /^m/) { $adjust[1] += $amount }
+	elsif ($unit =~ /^h/) { $adjust[2] += $amount }
+	elsif ($unit =~ /^d/) { $adjust[3] += $amount }
+	elsif ($unit =~ /^y/) { $adjust[5] += $amount }
 
 	else {
 	    ::logError("adjust_time(): bad unit: $unit");
@@ -2542,26 +2571,27 @@ sub adjust_time {
     my @multip = (0, 60, 60, 24, 0, 12);
     my $monfrac = 0;
     foreach my $i (reverse 0..5) {
-	if ($times[$i] =~ /\./) {
+	if ($adjust[$i] =~ /\./) {
 	    if ($multip[$i]) {
-		$times[$i-1] += ($times[$i] - int $times[$i]) * $multip[$i];
+		$adjust[$i-1] += ($adjust[$i] - int $adjust[$i]) * $multip[$i];
 	    }
 
 	    elsif ($i == 4) {
 		# Fractions of a month need some really extra special handling.
-		$monfrac = $times[$i] - int $times[$i];
+		$monfrac = $adjust[$i] - int $adjust[$i];
 	    }
 
-	    $times[$i] = int $times[$i]
+	    $adjust[$i] = int $adjust[$i];
 	}
     }
 
-    $time = POSIX::mktime(@times);
+    $time = $perform_adjust->(\@times, \@adjust);
 
     # This is how we handle a fraction of a month:
     if ($monfrac) {
-	$times[4] += $monfrac > 0 ? 1 : -1;
-	my $timediff = POSIX::mktime(@times);
+	@adjust = (0)x6;
+	$adjust[4] = $monfrac > 0 ? 1 : -1;
+	my $timediff = $perform_adjust->(\@times, \@adjust);
 	$timediff = int(abs($timediff - $time) * $monfrac);
 	$time += $timediff;
     }

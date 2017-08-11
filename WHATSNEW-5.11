@@ -8,6 +8,29 @@
 ------------------------------------------------------------------------------
 
 
+Interchange 5.11 not yet released
+
+Installation
+----
+
+* Assume that if a source code control repository is present in
+  the installation directory, we don't need to do the archaic .~*
+  file copies.
+
+
+Core
+----
+
+* Add bcrypt filter.
+
+* Add [adjust-href] tag. Reads HTML passed to it, finds <a href> links
+  and adjusts ones that don't begin with an absolute path to
+  Interchange URLs. Normally done by setting "Pragma adjust_href" in
+  catalog.cfg (or [pragma adjust_href] at the top of the page).
+
+* Add code to Server.pm to adjust <a href="link"> tags when "Pragma adjust_href"
+  is in force. Uses above tag.
+
 Payments
 --------
 
@@ -60,3 +83,17 @@ Database
   The [if-mm] tag probably needs to be adjusted for this to work
   in the admin in real life.
 
+
+UserDB
+------
+
+* Add "fallback_login" option, to be used with "indirect_login". If indirect fails, it will fallback
+  to the primary key (by default, username). This could allow users to login with email
+  (indirect_login = usernick), but still support login via username if they opted to use their
+  username instead.
+
+* Add "promote_admin" option, to be used with "scratch". The option is set to the value of a
+  field name, which also has to be a "scratch" value. If that is true, and the value of the
+  field is true, the user will be promoted to $Vend::admin. They will not be $Vend::super.
+  Note that this does not gain access to the classic Interchange UI without modification,
+  since the login_table will not be admin (the test which is used in most cases).

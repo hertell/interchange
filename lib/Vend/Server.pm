@@ -23,7 +23,7 @@
 
 package Vend::Server;
 
-use vars qw($VERSION $Has_JSON);
+use vars qw($VERSION $Has_JSON $RUNDIR);
 $VERSION = '2.108';
 
 use Cwd;
@@ -564,8 +564,7 @@ sub parse_multipart {
 
 
 sub create_cookie {
-	my($domain,$path) = @_;
-	my  $out;
+	my ($default_domain, $default_path) = @_;
 
 	if ($Vend::suppress_cookies) {
 #::logDebug('explicitly clearing the cookie jar (nom nom nom)');
@@ -582,7 +581,7 @@ sub create_cookie {
 
 	my @jar;
 	push @jar, [
-				($::Instance->{CookieName} || 'MV_SESSION_ID'),
+				$::Instance->{CookieName} || 'MV_SESSION_ID',
 				defined $::Instance->{ClearCookie} ? '' : $Vend::SessionName,
 				$Vend::Expire || undef,
 				undef,
@@ -592,17 +591,19 @@ sub create_cookie {
 		unless $Vend::CookieID;
 	push @jar, @{$::Instance->{Cookies}}
 		if defined $::Instance->{Cookies};
-	$out = '';
-	foreach my $cookie (@jar) {
-		my ($name, $value, $expire, $d, $p, $secure) = @$cookie;
-		$d = $domain if ! $d;
-		$p = $path   if ! $p;
-#::logDebug("create_cookie: name=$name value=$value expire=$expire");
+#::logDebug("create_cookie jar=" . ::uneval(\@jar));
+
+	my @out;
+	for my $cookie (@jar) {
+		my ($name, $value, $expire, $domain, $path, $secure) = @$cookie;
+		$domain ||= $default_domain;
+		$path   ||= $default_path;
+#::logDebug("create_cookie: name=$name value=$value expire=$expire domain=$domain path=$path secure=$secure");
 		$value = Vend::Interpolate::esc($value) 
 			if $value !~ /^[-\w:.]+$/;
-		$out .= "Set-Cookie: $name=$value;";
-		$out .= " path=$p;";
-		$out .= " domain=" . $d . ";" if $d;
+		my @pieces = "Set-Cookie: $name=$value";
+		push @pieces, "Path=$path";
+		push @pieces, "Domain=$domain" if $domain;
 		if (defined $expire or $Vend::Expire) {
 			my $expstring;
 			if(! $expire) {
@@ -611,16 +612,19 @@ sub create_cookie {
 			elsif($expire =~ /\s\S+\s/) {
 				$expstring = $expire;
 			}
-			$expstring = strftime "%a, %d-%b-%Y %H:%M:%S GMT ", gmtime($expire)
-				unless $expstring;
-			$expstring = "expires=$expstring" if $expstring !~ /^\s*expires=/i;
-			$expstring =~ s/^\s*/ /;
-			$out .= $expstring;
+			$expstring ||= strftime("%a, %d-%b-%Y %H:%M:%S GMT", gmtime($expire));
+			$expstring =~ s/^\s+//;
+			$expstring = "Expires=$expstring" if $expstring !~ /^expires=/i;
+			push @pieces, $expstring;
 		}
-		$out .= '; secure' if $secure;
-		$out .= '; HttpOnly' if $::Pragma->{set_httponly};
-		$out .= "\r\n";
+		push @pieces, 'Secure' if $secure;
+		push @pieces, 'HttpOnly' if $::Pragma->{set_httponly};
+		my $header = join('; ', @pieces);
+#::logDebug("create_cookie made header: $header");
+		push @out, $header;
 	}
+
+	my $out = join('', map { "$_\r\n" } @out);
 	return $out;
 }
 
@@ -697,17 +701,21 @@ sub respond {
 		binmode(MESSAGE, ':utf8');
 	}
 
+	## Set this to determine if we want to do HTML-specific transformations. Also
+	## may be set below.
+	$Vend::IsHTML = $Vend::StatusLine =~ m{Content-Type:.*text/html}i;
+
 	if(! $s and $Vend::StatusLine) {
 		if ($Vend::StatusLine !~ /^Content-Type:/im) {
-		$Vend::StatusLine .= "\r\nContent-Type: text/html";
-		if ($response_charset) {
-			$Vend::StatusLine .= "; charset=$response_charset\r\n";
-		}
+			$Vend::StatusLine .= "\r\nContent-Type: text/html";
+			if ($response_charset) {
+				$Vend::StatusLine .= "; charset=$response_charset\r\n";
+			}
 
-		else {
-			$Vend::StatusLine .= "\r\n";
+			else {
+				$Vend::StatusLine .= "\r\n";
+			}
 		}
-	}
 
 # TRACK
 		$Vend::StatusLine .= "X-Track: " . $Vend::Track->header() . "\r\n"
@@ -715,6 +723,12 @@ sub respond {
 # END TRACK
 
 		add_cache_headers();
+
+		### Adjust links if appropriate
+		if($Vend::IsHTML and $::Pragma->{adjust_href}) {
+			my $text = Vend::Tags->adjust_href($$body);
+			$body = \$text;
+		}
 
 		print MESSAGE canon_status($Vend::StatusLine);
 		print MESSAGE "\r\n";
@@ -750,6 +764,13 @@ sub respond {
 	}
 
 	if($Vend::ResponseMade || $CGI::values{mv_no_header} ) {
+
+		### Adjust links if appropriate
+		if($Vend::IsHTML and $::Pragma->{adjust_href}) {
+			my $text = Vend::Tags->adjust_href($$body);
+			$body = \$text;
+		}
+
 		print $fh $$body;
 		print $rfh $$body if $rfh;
 #show_times("end response send") if $Global::ShowTimes;
@@ -859,6 +880,10 @@ sub respond {
 		else {
 			print $fh canon_status("Content-Type: text/html");
 		}
+
+		## This is HTML for sure now. Set this to force HTML-specific transformations if pragma(s) set.
+		$Vend::IsHTML = 1;
+
 # TRACK
 		print $fh canon_status("X-Track: " . $Vend::Track->header())
 			if $Vend::Track and $Vend::Cfg->{UserTrack};
@@ -868,6 +893,13 @@ sub respond {
 	print $fh canon_status($_) for get_cache_headers();
 
 	print $fh "\r\n";
+
+	### Adjust links if appropriate
+	if($Vend::IsHTML and $::Pragma->{adjust_href}) {
+		my $text = Vend::Tags->adjust_href($$body);
+		$body = \$text;
+	}
+
 	print $fh $$body;
 	print $rfh $$body if $rfh;
 #show_times("end response send") if $Global::ShowTimes;
@@ -3045,7 +3077,6 @@ sub run_jobs {
 }
 
 sub unlink_pid {
-	close(TEMPPID);
 	unlink("$Global::RunDir/pid.$$");
 	1;
 }
